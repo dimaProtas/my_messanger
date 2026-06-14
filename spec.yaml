@@ -1,0 +1,985 @@
+openapi: "3.0.3"
+info:
+  title: Messenger API
+  description: Backend упрощённого мессенджера (аналог Telegram). Аутентификация по JWT, REST + WebSocket.
+  version: "1.0.0"
+  contact:
+    name: Messenger Team
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Локальный сервер разработки
+
+tags:
+  - name: Auth
+    description: Регистрация, вход, обновление токенов, выход
+  - name: Users
+    description: Профиль и поиск пользователей
+  - name: Contacts
+    description: Управление контактами
+  - name: Chats
+    description: Личные и групповые чаты, участники
+  - name: Messages
+    description: Отправка, история и статусы сообщений
+  - name: Health
+    description: Health-check и readiness
+
+paths:
+  # ── Health ──────────────────────────────────────────────
+  /health:
+    get:
+      tags: [Health]
+      summary: Проверка здоровья сервиса (БД + Redis)
+      responses:
+        "200":
+          description: Сервис здоров
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthOk"
+        "503":
+          description: Сервис нездоров
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthFail"
+
+  /ready:
+    get:
+      tags: [Health]
+      summary: Готовность принимать трафик
+      responses:
+        "200":
+          description: Сервис готов
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+
+  # ── Auth ────────────────────────────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Регистрация нового пользователя
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Пользователь создан, возвращены токены
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Вход по номеру телефона и паролю
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Успешный вход
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/InvalidCredentials"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Обновление пары токенов по refresh-токену
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Новая пара токенов
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Выход (инвалидация токенов)
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+      responses:
+        "200":
+          description: Успешный выход
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: logged out
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Users ───────────────────────────────────────────────
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Профиль текущего пользователя
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Профиль пользователя
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      tags: [Users]
+      summary: Обновление профиля (username)
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileRequest"
+      responses:
+        "200":
+          description: Обновлённый профиль
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /users/search:
+    get:
+      tags: [Users]
+      summary: Поиск пользователей по номеру телефона
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: phone
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Часть номера телефона для поиска (мин. 1 цифра)
+      responses:
+        "200":
+          description: Результаты поиска (макс. 20)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserSearchResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Contacts ────────────────────────────────────────────
+  /contacts:
+    get:
+      tags: [Contacts]
+      summary: Список контактов текущего пользователя
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Список контактов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContactResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Contacts]
+      summary: Добавить контакт
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddContactRequest"
+      responses:
+        "201":
+          description: Контакт добавлен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /contacts/{contactId}:
+    delete:
+      tags: [Contacts]
+      summary: Удалить контакт
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: contactId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Контакт удалён
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Chats ───────────────────────────────────────────────
+  /chats:
+    get:
+      tags: [Chats]
+      summary: Список чатов пользователя с последним сообщением
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Список чатов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /chats/private:
+    post:
+      tags: [Chats]
+      summary: Создать личный чат с пользователем
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePrivateRequest"
+      responses:
+        "201":
+          description: Чат создан (или возвращён существующий)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Чат уже существует (возвращается существующий)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+
+  /chats/group:
+    post:
+      tags: [Chats]
+      summary: Создать групповой чат
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGroupRequest"
+      responses:
+        "201":
+          description: Групповой чат создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /chats/{chatId}:
+    get:
+      tags: [Chats]
+      summary: Информация о чате
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Данные чата
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /chats/{chatId}/members:
+    post:
+      tags: [Chats]
+      summary: Добавить участника в групповой чат
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddMemberRequest"
+      responses:
+        "204":
+          description: Участник добавлен
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Участник уже в чате
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /chats/{chatId}/members/{userId}:
+    delete:
+      tags: [Chats]
+      summary: Удалить участника из группового чата
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Участник удалён
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Messages ────────────────────────────────────────────
+  /chats/{chatId}/messages:
+    post:
+      tags: [Messages]
+      summary: Отправить сообщение в чат (через Kafka)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "202":
+          description: Сообщение принято в очередь
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    get:
+      tags: [Messages]
+      summary: История сообщений чата (пагинация курсором)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+          description: Количество сообщений
+        - name: before
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Курсор — вернуть сообщения ДО этого времени
+      responses:
+        "200":
+          description: Сообщения чата
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Message"
+                  has_more:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /messages/{messageId}/status:
+    put:
+      tags: [Messages]
+      summary: Обновить статус сообщения (delivered / read)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateStatusRequest"
+      responses:
+        "200":
+          description: Статус обновлён
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── WebSocket ───────────────────────────────────────────
+  /ws:
+    get:
+      tags: [Messages]
+      summary: WebSocket-соединение для real-time сообщений
+      description: >
+        Устанавливает WebSocket-соединение. Аутентификация через query-параметр `token`.
+        Сервер отправляет клиенту события `new_message` и `message_status`.
+        Поддерживается Ping/Pong (ping каждые 54с, pong timeout 60с).
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Access-токен (JWT)
+      responses:
+        "101":
+          description: WebSocket-соединение установлено
+
+# ═══════════════════════════════════════════════════════════
+# Components
+# ═══════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access-токен, полученный при регистрации/входе
+
+  schemas:
+    # ── Auth ──────────────────────────────────────────
+    RegisterRequest:
+      type: object
+      required: [phone_number, password, username]
+      properties:
+        phone_number:
+          type: string
+          minLength: 7
+          maxLength: 15
+          description: Номер телефона (только цифры, без форматирования)
+          example: "79161234567"
+        password:
+          type: string
+          minLength: 8
+          description: Пароль (мин. 8 символов)
+          example: securePass123
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+          description: Имя пользователя
+          example: john_doe
+
+    LoginRequest:
+      type: object
+      required: [phone_number, password]
+      properties:
+        phone_number:
+          type: string
+          example: "79161234567"
+        password:
+          type: string
+          example: securePass123
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: Refresh-токен
+
+    LogoutRequest:
+      type: object
+      properties:
+        refresh_token:
+          type: string
+          description: Опциональный refresh-токен для инвалидации
+
+    AuthResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: Access-токен (JWT, время жизни из конфига)
+        refresh_token:
+          type: string
+          description: Refresh-токен (JWT, время жизни из конфига)
+        user:
+          $ref: "#/components/schemas/User"
+
+    # ── User ──────────────────────────────────────────
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone_number:
+          type: string
+        username:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    UpdateProfileRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+          description: Новое имя пользователя
+
+    UserSearchResult:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        phone_number:
+          type: string
+          description: Маскированный номер (напр. +7916*****67)
+
+    # ── Contacts ──────────────────────────────────────
+    AddContactRequest:
+      type: object
+      required: [contact_user_id]
+      properties:
+        contact_user_id:
+          type: string
+          format: uuid
+          description: ID пользователя, которого добавляем в контакты
+
+    ContactResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        contact_user:
+          $ref: "#/components/schemas/UserSearchResult"
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Chats ─────────────────────────────────────────
+    CreatePrivateRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: ID собеседника
+
+    CreateGroupRequest:
+      type: object
+      required: [name, member_ids]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Название группы
+        member_ids:
+          type: array
+          minItems: 2
+          items:
+            type: string
+            format: uuid
+          description: ID участников (создатель добавится автоматически)
+
+    AddMemberRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+
+    ChatMember:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        joined_at:
+          type: string
+          format: date-time
+
+    LastMessage:
+      type: object
+      properties:
+        content:
+          type: string
+        sent_at:
+          type: string
+          format: date-time
+        sender_id:
+          type: string
+          format: uuid
+
+    ChatResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [private, group]
+        name:
+          type: string
+          description: Название (для групп) или username собеседника (для private)
+        created_by:
+          type: string
+          format: uuid
+          description: ID создателя (для групп)
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMember"
+        last_message:
+          $ref: "#/components/schemas/LastMessage"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Messages ──────────────────────────────────────
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Текст сообщения
+
+    UpdateStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [delivered, read]
+          description: Новый статус (sent→delivered→read)
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        chat_id:
+          type: string
+          format: uuid
+        sender_id:
+          type: string
+          format: uuid
+        content:
+          type: string
+        sent_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [sent, delivered, read]
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Health ────────────────────────────────────────
+    HealthOk:
+      type: object
+      properties:
+        status:
+          type: string
+          example: healthy
+
+    HealthFail:
+      type: object
+      properties:
+        status:
+          type: string
+          example: unhealthy
+        reason:
+          type: string
+          example: database unreachable
+
+    # ── Common ────────────────────────────────────────
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Код ошибки
+        message:
+          type: string
+          description: Человекочитаемое описание
+
+    ValidationError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+  responses:
+    BadRequest:
+      description: Невалидные входные данные
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "BAD_REQUEST"
+            message: "Invalid request body"
+
+    Unauthorized:
+      description: Токен отсутствует, невалиден или истёк
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "UNAUTHORIZED"
+            message: "Invalid or expired token"
+
+    InvalidCredentials:
+      description: Неверный номер телефона или пароль
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "INVALID_CREDENTIALS"
+            message: "Invalid phone number or password"
+
+    Forbidden:
+      description: Нет прав на операцию
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "FORBIDDEN"
+            message: "User is not a member of this chat"
+
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "NOT_FOUND"
+            message: "Resource not found"
+
+    Conflict:
+      description: Конфликт (дубликат)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "ALREADY_EXISTS"
+            message: "Resource already exists"
+
+    ValidationError:
+      description: Ошибка валидации полей
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationError"
+
+    InternalError:
+      description: Внутренняя ошибка сервера
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "INTERNAL_ERROR"
+            message: "Internal server error"
